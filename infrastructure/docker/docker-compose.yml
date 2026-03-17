@@ -1,0 +1,163 @@
+# =============================================================================
+# Word Cloud Analytics Platform - Docker Compose
+# =============================================================================
+# Development environment with all services.
+# Usage: docker-compose up -d
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # API Server
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ../../api
+      dockerfile: Dockerfile
+    container_name: wordcloud-api
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - DATABASE_URL=postgresql://wordcloud:password@postgres:5432/wordcloud
+      - REDIS_URL=redis://redis:6379
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - STORAGE_ENDPOINT=http://minio:9000
+      - STORAGE_ACCESS_KEY_ID=minioadmin
+      - STORAGE_SECRET_ACCESS_KEY=minioadmin
+      - STORAGE_BUCKET=word-cloud-exports
+      - JWT_SECRET=${JWT_SECRET:-development-jwt-secret-change-in-production}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-development-refresh-secret-change-in-production}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3000,http://localhost:5173}
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
+      minio:
+        condition: service_started
+    networks:
+      - wordcloud-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: wordcloud-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_USER=wordcloud
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=wordcloud
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - wordcloud-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wordcloud"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Redis Cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: wordcloud-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - wordcloud-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # ClickHouse Analytics
+  # ---------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: wordcloud-clickhouse
+    restart: unless-stopped
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    environment:
+      - CLICKHOUSE_DB=wordcloud_analytics
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+    networks:
+      - wordcloud-network
+
+  # ---------------------------------------------------------------------------
+  # MinIO (S3-Compatible Storage)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: wordcloud-minio
+    restart: unless-stopped
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - wordcloud-network
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Development)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ../../web
+      dockerfile: Dockerfile.dev
+    container_name: wordcloud-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    environment:
+      - VITE_API_URL=http://localhost:3000
+      - VITE_CDN_URL=http://localhost:9000/word-cloud-exports
+    volumes:
+      - ../../web/src:/app/src:ro
+      - ../../web/public:/app/public:ro
+    networks:
+      - wordcloud-network
+
+networks:
+  wordcloud-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  clickhouse-data:
+  minio-data:

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: wordcloud
+description: Word Cloud Analytics Platform - Enterprise Deployment
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+maintainers:
+  - name: Word Cloud Team
+    email: team@wordcloud.example.com
+sources:
+  - https://github.com/example/word-cloud-platform
+keywords:
+  - word-cloud
+  - analytics
+  - visualization

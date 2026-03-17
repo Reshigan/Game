@@ -1,0 +1,281 @@
+# =============================================================================
+# Word Cloud Analytics Platform - Helm Values
+# =============================================================================
+# Default values for production deployment.
+# Override with -f values-production.yaml or --set
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Global Settings
+# -----------------------------------------------------------------------------
+global:
+  environment: production
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: "standard-ssd"
+
+# -----------------------------------------------------------------------------
+# API Deployment
+# -----------------------------------------------------------------------------
+api:
+  replicaCount: 3
+  image:
+    repository: wordcloud/api
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  env:
+    NODE_ENV: production
+    LOG_LEVEL: info
+
+  secrets:
+    DATABASE_URL: ""
+    REDIS_URL: ""
+    CLICKHOUSE_URL: ""
+    JWT_SECRET: ""
+    JWT_REFRESH_SECRET: ""
+    STORAGE_ACCESS_KEY_ID: ""
+    STORAGE_SECRET_ACCESS_KEY: ""
+
+  configMaps:
+    CORS_ORIGIN: ""
+    STORAGE_ENDPOINT: ""
+    STORAGE_REGION: ""
+    STORAGE_BUCKET: ""
+
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: 3000
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: 3000
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# -----------------------------------------------------------------------------
+# Frontend Deployment
+# -----------------------------------------------------------------------------
+frontend:
+  replicaCount: 2
+  image:
+    repository: wordcloud/frontend
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 80
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  env:
+    VITE_API_URL: ""
+    VITE_CDN_URL: ""
+
+# -----------------------------------------------------------------------------
+# PostgreSQL (Managed or Self-Hosted)
+# -----------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: ""
+    username: wordcloud
+    password: ""
+    database: wordcloud
+
+  primary:
+    persistence:
+      enabled: true
+      size: 100Gi
+      storageClass: "standard-ssd"
+
+    resources:
+      requests:
+        cpu: 1
+        memory: 2Gi
+      limits:
+        cpu: 4
+        memory: 8Gi
+
+# -----------------------------------------------------------------------------
+# Redis
+# -----------------------------------------------------------------------------
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: ""
+
+  master:
+    persistence:
+      enabled: true
+      size: 10Gi
+
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 1
+        memory: 1Gi
+
+# -----------------------------------------------------------------------------
+# ClickHouse
+# -----------------------------------------------------------------------------
+clickhouse:
+  enabled: true
+  image:
+    repository: clickhouse/clickhouse-server
+    tag: latest
+
+  persistence:
+    enabled: true
+    size: 500Gi
+
+  resources:
+    requests:
+      cpu: 1
+      memory: 4Gi
+    limits:
+      cpu: 8
+      memory: 16Gi
+
+# -----------------------------------------------------------------------------
+# MinIO (S3-Compatible Storage)
+# -----------------------------------------------------------------------------
+minio:
+  enabled: true
+  mode: distributed
+  replicas: 4
+
+  auth:
+    rootUser: ""
+    rootPassword: ""
+
+  persistence:
+    enabled: true
+    size: 100Gi
+    storageClass: "standard-ssd"
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 4Gi
+
+# -----------------------------------------------------------------------------
+# Ingress
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+
+  hosts:
+    - host: api.wordcloud.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: api
+
+    - host: app.wordcloud.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+
+  tls:
+    - secretName: wordcloud-tls
+      hosts:
+        - api.wordcloud.example.com
+        - app.wordcloud.example.com
+
+# -----------------------------------------------------------------------------
+# Monitoring
+# -----------------------------------------------------------------------------
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+
+  grafana:
+    enabled: true
+    dashboards:
+      - api-performance
+      - database-metrics
+      - clickhouse-analytics
+
+# -----------------------------------------------------------------------------
+# Network Policies
+# -----------------------------------------------------------------------------
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3000
+
+# -----------------------------------------------------------------------------
+# Pod Security
+# -----------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true

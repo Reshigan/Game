@@ -1,0 +1,192 @@
+// Prisma Schema for Word Cloud Analytics Platform
+// PostgreSQL with Row-Level Security
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["fullTextSearch", "fullTextIndex"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Tenant model - represents an organization/account
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  subdomain String   @unique
+  plan      String   @default("free")
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  version   Int      @default(0)
+
+  // Relations
+  users      User[]
+  wordClouds WordCloud[]
+  settings   TenantSetting[]
+  jobs       Job[]
+  auditLogs  AuditLog[]
+
+  @@index([subdomain])
+  @@index([status])
+  @@map("tenants")
+}
+
+// User model - represents a user within a tenant
+model User {
+  id           String   @id @default(cuid())
+  tenantId     String
+  email        String
+  passwordHash String
+  name         String?
+  role         String   @default("user")
+  status       String   @default("active")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  version      Int      @default(0)
+
+  // Relations
+  tenant            Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  wordClouds        WordCloud[]
+  configVersions    WordCloudConfigVersion[]
+  auditLogs         AuditLog[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([email])
+  @@index([status])
+  @@map("users")
+}
+
+// Word Cloud model - represents a word cloud configuration
+model WordCloud {
+  id          String   @id @default(cuid())
+  tenantId    String
+  userId      String
+  name        String
+  description String?
+  config      Json
+  status      String   @default("draft")
+  embedId     String?  @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  version     Int      @default(0)
+
+  // Relations
+  tenant         Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user           User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  configVersions WordCloudConfigVersion[]
+  exports        WordCloudExport[]
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("word_clouds")
+}
+
+// Word Cloud Config Version - for version history
+model WordCloudConfigVersion {
+  id           String   @id @default(cuid())
+  wordCloudId  String
+  versionNumber Int
+  snapshot     Json
+  createdById  String
+  createdAt    DateTime @default(now())
+
+  // Relations
+  wordCloud WordCloud @relation(fields: [wordCloudId], references: [id], onDelete: Cascade)
+  createdBy User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@unique([wordCloudId, versionNumber])
+  @@index([wordCloudId])
+  @@map("word_cloud_config_versions")
+}
+
+// Word Cloud Export - represents an export job
+model WordCloudExport {
+  id          String   @id @default(cuid())
+  wordCloudId String
+  exportType  String
+  status      String   @default("pending")
+  s3Key       String?
+  error       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  version     Int      @default(0)
+
+  // Relations
+  wordCloud WordCloud @relation(fields: [wordCloudId], references: [id], onDelete: Cascade)
+
+  @@index([wordCloudId])
+  @@index([status])
+  @@map("word_cloud_exports")
+}
+
+// Job model - for background job processing
+model Job {
+  id           String   @id @default(cuid())
+  type         String
+  payload      Json
+  status       String   @default("pending")
+  attempts     Int      @default(0)
+  maxAttempts  Int      @default(3)
+  scheduledAt  DateTime @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  error       String?
+  tenantId    String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@map("jobs")
+}
+
+// Tenant Setting - key-value settings per tenant
+model TenantSetting {
+  id        String   @id @default(cuid())
+  tenantId  String
+  key       String
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, key])
+  @@index([tenantId])
+  @@map("tenant_settings")
+}
+
+// Audit Log - for compliance and security tracking
+model AuditLog {
+  id         String   @id @default(cuid())
+  entityType String
+  entityId   String
+  fieldName  String
+  oldValue   Json?
+  newValue   Json?
+  changedById String
+  ipAddress  String?
+  tenantId   String
+  createdAt  DateTime @default(now())
+
+  // Relations
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  changedBy User  @relation(fields: [changedById], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([entityType, entityId])
+  @@index([changedById])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
