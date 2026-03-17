@@ -1,4 +1,6 @@
+// src/lib/cache/client.ts
 import Redis from 'ioredis';
+import { logger } from '@/lib/utils/logger';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -29,16 +31,31 @@ function createRedisClient(): Redis {
     tls: process.env.NODE_ENV === 'production' ? {} : undefined,
   });
 
-  client.on('error', (error) => {
-    console.error('Redis connection error:', error);
+  client.on('error', (error: Error) => {
+    logger.error({
+      message: 'Redis connection error',
+      error: {
+        message: error.message,
+        stack: error.stack,
+        name: error.name,
+      },
+    });
   });
 
   client.on('connect', () => {
-    console.log('Redis connected');
+    logger.info({ message: 'Redis client connected' });
   });
 
   client.on('ready', () => {
-    console.log('Redis ready');
+    logger.info({ message: 'Redis client ready' });
+  });
+
+  client.on('close', () => {
+    logger.warn({ message: 'Redis connection closed' });
+  });
+
+  client.on('reconnecting', () => {
+    logger.info({ message: 'Redis client reconnecting' });
   });
 
   return client;
@@ -57,7 +74,7 @@ if (process.env.NODE_ENV === 'production') {
 export { redis };
 
 /**
- * Cache utility functions.
+ * Cache utility functions with typed serialization.
  */
 export const cache = {
   async get<T>(key: string): Promise<T | null> {
@@ -66,11 +83,12 @@ export const cache = {
     try {
       return JSON.parse(value) as T;
     } catch {
+      // If parsing fails, return the raw value for string caches
       return value as unknown as T;
     }
   },
 
-  async set(key: string, value: any, ttlSeconds?: number): Promise<void> {
+  async set(key: string, value: unknown, ttlSeconds?: number): Promise<void> {
     const serialized = JSON.stringify(value);
     if (ttlSeconds) {
       await redis.setex(key, ttlSeconds, serialized);
@@ -94,89 +112,117 @@ export const cache = {
     return result === 1;
   },
 
-  async increment(key: string, ttlSeconds?: number): Promise<number> {
-    const result = await redis.incr(key);
-    if (ttlSeconds && result === 1) {
-      await redis.expire(key, ttlSeconds);
+  async increment(key: string, by = 1): Promise<number> {
+    return redis.incrby(key, by);
+  },
+
+  async decrement(key: string, by = 1): Promise<number> {
+    return redis.decrby(key, by);
+  },
+
+  async setWithExpiry(key: string, value: unknown, ttlSeconds: number): Promise<void> {
+    const serialized = JSON.stringify(value);
+    await redis.setex(key, ttlSeconds, serialized);
+  },
+
+  async getOrSet<T>(
+    key: string,
+    factory: () => Promise<T>,
+    ttlSeconds: number
+  ): Promise<T> {
+    const cached = await cache.get<T>(key);
+    if (cached !== null) {
+      return cached;
     }
-    return result;
+
+    const value = await factory();
+    await cache.set(key, value, ttlSeconds);
+    return value;
+  },
+
+  /**
+   * Acquire a distributed lock.
+   */
+  async acquireLock(
+    key: string,
+    ttlMs: number,
+    retries = 3,
+    retryDelayMs = 100
+  ): Promise<string | null> {
+    const lockId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    
+    for (let attempt = 0; attempt < retries; attempt++) {
+      const acquired = await redis.set(key, lockId, 'PX', ttlMs, 'NX');
+      if (acquired === 'OK') {
+        return lockId;
+      }
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+    
+    return null;
+  },
+
+  /**
+   * Release a distributed lock.
+   */
+  async releaseLock(key: string, lockId: string): Promise<boolean> {
+    const script = `
+      if redis.call("get", KEYS[1]) == ARGV[1] then
+        return redis.call("del", KEYS[1])
+      else
+        return 0
+      end
+    `;
+    const result = await redis.eval(script, 1, key, lockId);
+    return result === 1;
   },
 };
 
 /**
- * Session management utilities.
- */
-export const session = {
-  async create(sessionId: string, data: Record<string, any>, ttlSeconds = 3600): Promise<void> {
-    await cache.set(`session:${sessionId}`, data, ttlSeconds);
-  },
-
-  async get<T>(sessionId: string): Promise<T | null> {
-    return cache.get<T>(`session:${sessionId}`);
-  },
-
-  async delete(sessionId: string): Promise<void> {
-    await cache.delete(`session:${sessionId}`);
-  },
-
-  async refresh(sessionId: string, ttlSeconds = 3600): Promise<boolean> {
-    const exists = await cache.exists(`session:${sessionId}`);
-    if (exists) {
-      await redis.expire(`session:${sessionId}`, ttlSeconds);
-      return true;
-    }
-    return false;
-  },
-};
-
-/**
- * Rate limiting utilities.
+ * Rate limiting helper.
  */
 export const rateLimit = {
-  async checkLimit(
+  async check(
     key: string,
-    maxRequests: number,
-    windowSeconds: number
+    limit: number,
+    windowMs: number
   ): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
-    const current = await cache.increment(key, windowSeconds);
-    const remaining = Math.max(0, maxRequests - current);
-    const ttl = await redis.ttl(key);
-    const resetAt = Date.now() + (ttl > 0 ? ttl * 1000 : windowSeconds * 1000);
-
+    const now = Date.now();
+    const windowStart = now - windowMs;
+    
+    // Remove old entries
+    await redis.zremrangebyscore(key, 0, windowStart);
+    
+    // Count current entries
+    const count = await redis.zcard(key);
+    
+    if (count >= limit) {
+      const oldest = await redis.zrange(key, 0, 0, 'WITHSCORES');
+      const resetAt = oldest.length >= 2 ? parseInt(oldest[1] as string, 10) + windowMs : now + windowMs;
+      return {
+        allowed: false,
+        remaining: 0,
+        resetAt,
+      };
+    }
+    
+    // Add current request
+    await redis.zadd(key, now.toString(), `${now}-${Math.random().toString(36).substring(2, 9)}`);
+    await redis.expire(key, Math.ceil(windowMs / 1000));
+    
     return {
-      allowed: current <= maxRequests,
-      remaining,
-      resetAt,
+      allowed: true,
+      remaining: limit - count - 1,
+      resetAt: now + windowMs,
     };
   },
 };
 
 /**
- * Graceful shutdown handler.
+ * Graceful shutdown.
  */
-export async function disconnectRedis(): Promise<void> {
+export async function disconnectCache(): Promise<void> {
   await redis.quit();
 }
 
-/**
- * Health check for Redis connection.
- */
-export async function checkRedisConnection(): Promise<{
-  status: 'ok' | 'error';
-  latency?: number;
-  error?: string;
-}> {
-  const start = Date.now();
-  try {
-    await redis.ping();
-    return {
-      status: 'ok',
-      latency: Date.now() - start,
-    };
-  } catch (error) {
-    return {
-      status: 'error',
-      error: error instanceof Error ? error.message : 'Unknown Redis error',
-    };
-  }
-}
+export default redis;

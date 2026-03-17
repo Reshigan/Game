@@ -1,622 +1,439 @@
-import { FastifyInstance } from 'fastify';
+// src/app/api/v1/word-clouds/route.ts
+/**
+ * Word Cloud API Routes
+ * Handles CRUD operations for word clouds
+ * 
+ * Refactored for maintainability - logic extracted into separate modules
+ */
+
+import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '@/lib/db/client';
-import { authMiddleware, tenantMiddleware } from '@/middleware';
-import { logger } from '@/lib/utils/logger';
-import { createIdempotencyMiddleware } from '@/middleware';
+import { logger, log } from '@/lib/utils/logger';
+import { requireAuth } from '@/middleware/auth.middleware';
+import { requireTenant } from '@/middleware/tenant.middleware';
+import { rateLimitMiddleware } from '@/middleware/rateLimit.middleware';
 
-const CreateWordCloudSchema = z.object({
+// Validation schemas
+const createWordCloudSchema = z.object({
   name: z.string().min(1).max(255),
+  description: z.string().max(1000).optional(),
   config: z.object({
-    words: z.array(
-      z.object({
-        text: z.string().min(1).max(100),
-        weight: z.number().min(1).max(100),
-      }),
-    ),
-    colors: z.array(z.string()).optional(),
+    words: z.array(z.object({
+      text: z.string().min(1).max(100),
+      weight: z.number().min(1).max(100),
+      color: z.string().optional(),
+    })).min(1).max(500),
+    width: z.number().min(100).max(2000).optional(),
+    height: z.number().min(100).max(2000).optional(),
+    backgroundColor: z.string().optional(),
     fontFamily: z.string().optional(),
-    fontSize: z.object({
-      min: z.number().optional(),
-      max: z.number().optional(),
-    }).optional(),
-    rotation: z.object({
-      min: z.number().optional(),
-      max: z.number().optional(),
-      steps: z.number().optional(),
-    }).optional(),
-    shape: z.enum(['circle', 'cardioid', 'diamond', 'square', 'triangle', 'pentagon', 'star']).optional(),
+    rotationRange: z.tuple([z.number(), z.number()]).optional(),
+    colors: z.array(z.string()).optional(),
   }),
 });
 
-const UpdateWordCloudSchema = z.object({
-  id: z.string().uuid(),
+const updateWordCloudSchema = z.object({
   name: z.string().min(1).max(255).optional(),
+  description: z.string().max(1000).optional(),
   config: z.object({
-    words: z.array(
-      z.object({
-        text: z.string().min(1).max(100),
-        weight: z.number().min(1).max(100),
-      }),
-    ).optional(),
-    colors: z.array(z.string()).optional(),
+    words: z.array(z.object({
+      text: z.string().min(1).max(100),
+      weight: z.number().min(1).max(100),
+      color: z.string().optional(),
+    })).min(1).max(500),
+    width: z.number().min(100).max(2000).optional(),
+    height: z.number().min(100).max(2000).optional(),
+    backgroundColor: z.string().optional(),
     fontFamily: z.string().optional(),
-    fontSize: z.object({
-      min: z.number().optional(),
-      max: z.number().optional(),
-    }).optional(),
-    rotation: z.object({
-      min: z.number().optional(),
-      max: z.number().optional(),
-      steps: z.number().optional(),
-    }).optional(),
-    shape: z.enum(['circle', 'cardioid', 'diamond', 'square', 'triangle', 'pentagon', 'star']).optional(),
+    rotationRange: z.tuple([z.number(), z.number()]).optional(),
+    colors: z.array(z.string()).optional(),
   }).optional(),
+  status: z.enum(['draft', 'published', 'archived']).optional(),
 });
 
-const DeleteWordCloudSchema = z.object({
-  id: z.string().uuid(),
+const listQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  status: z.enum(['draft', 'published', 'archived']).optional(),
+  search: z.string().optional(),
+  sortBy: z.enum(['createdAt', 'updatedAt', 'name']).default('createdAt'),
+  sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
 
-type CreateWordCloudRequest = z.infer<typeof CreateWordCloudSchema>;
-type UpdateWordCloudRequest = z.infer<typeof UpdateWordCloudSchema>;
-type DeleteWordCloudRequest = z.infer<typeof DeleteWordCloudSchema>;
-
-export async function wordCloudsRoute(fastify: FastifyInstance) {
-  // GET /api/v1/word-clouds - List word clouds
-  fastify.get(
-    '/word-clouds',
-    {
-      preHandler: [authMiddleware, tenantMiddleware],
-    },
-    async (request, reply) => {
-      const requestId = request.id;
-      const startTime = Date.now();
-      const { tenantId } = request;
-
-      try {
-        const page = parseInt(request.query.page as string) || 1;
-        const pageSize = parseInt(request.query.pageSize as string) || 20;
-        const cursor = request.query.cursor as string | undefined;
-
-        // Build query
-        const where: any = {
-          tenantId,
-          status: {
-            not: 'deleted',
-          },
-        };
-
-        if (cursor) {
-          where.id = {
-            gt: cursor,
-          };
-        }
-
-        const wordClouds = await prisma.wordCloud.findMany({
-          where,
-          orderBy: {
-            createdAt: 'asc',
-          },
-          take: pageSize + 1, // Fetch one extra to determine if there are more pages
-          select: {
-            id: true,
-            name: true,
-            config: true,
-            status: true,
-            version: true,
-            createdAt: true,
-            updatedAt: true,
-            _count: {
-              select: {
-                exports: true,
-              },
-            },
-          },
-        });
-
-        const hasMore = wordClouds.length > pageSize;
-        const items = hasMore ? wordClouds.slice(0, -1) : wordClouds;
-        const nextCursor = hasMore ? items[items.length - 1].id : undefined;
-
-        const duration = Date.now() - startTime;
-
-        logger.info({
-          requestId,
-          message: 'Word clouds listed successfully',
-          statusCode: 200,
-          durationMs: duration,
-          tenantId,
-          count: items.length,
-        });
-
-        return reply.code(200).send({
-          data: {
-            wordClouds: items,
-            pagination: {
-              page,
-              pageSize,
-              hasMore,
-              nextCursor,
-            },
-          },
-          requestId,
-        });
-      } catch (error) {
-        const duration = Date.now() - startTime;
-
-        logger.error({
-          requestId,
-          message: 'Failed to list word clouds',
-          statusCode: 500,
-          durationMs: duration,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-
-        return reply.code(500).send({
-          error: {
-            code: 'INTERNAL_ERROR',
-            message: 'Failed to list word clouds',
-          },
-          requestId,
-        });
-      }
-    },
-  );
-
-  // POST /api/v1/word-clouds - Create word cloud
-  fastify.post(
-    '/word-clouds',
-    {
-      preHandler: [authMiddleware, tenantMiddleware, createIdempotencyMiddleware()],
-    },
-    async (request, reply) => {
-      const requestId = request.id;
-      const startTime = Date.now();
-      const { tenantId, userId } = request;
-
-      try {
-        const data = CreateWordCloudSchema.parse(request.body);
-
-        // Create word cloud
-        const wordCloud = await prisma.wordCloud.create({
-          data: {
-            name: data.name,
-            config: data.config,
-            status: 'draft',
-            version: 1,
-            tenantId,
-            userId,
-          },
-          select: {
-            id: true,
-            name: true,
-            config: true,
-            status: true,
-            version: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        });
-
-        // Create initial config version
-        await prisma.wordCloudConfigVersion.create({
-          data: {
-            wordCloudId: wordCloud.id,
-            versionNumber: 1,
-            snapshot: data.config,
-            createdById: userId,
-          },
-        });
-
-        const duration = Date.now() - startTime;
-
-        logger.info({
-          requestId,
-          message: 'Word cloud created successfully',
-          statusCode: 201,
-          durationMs: duration,
-          tenantId,
-          userId,
-          wordCloudId: wordCloud.id,
-        });
-
-        return reply.code(201).send({
-          data: {
-            wordCloud,
-          },
-          requestId,
-        });
-      } catch (error) {
-        const duration = Date.now() - startTime;
-
-        if (error instanceof z.ZodError) {
-          logger.warn({
-            requestId,
-            message: 'Word cloud creation validation failed',
-            statusCode: 400,
-            durationMs: duration,
-            errors: error.errors,
-          });
-
-          return reply.code(400).send({
-            error: {
-              code: 'VALIDATION_ERROR',
-              message: 'Invalid request data',
-              details: error.errors,
-            },
-            requestId,
-          });
-        }
-
-        logger.error({
-          requestId,
-          message: 'Failed to create word cloud',
-          statusCode: 500,
-          durationMs: duration,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-
-        return reply.code(500).send({
-          error: {
-            code: 'INTERNAL_ERROR',
-            message: 'Failed to create word cloud',
-          },
-          requestId,
-        });
-      }
-    },
-  );
-
-  // PUT /api/v1/word-clouds - Update word cloud
-  fastify.put(
-    '/word-clouds',
-    {
-      preHandler: [authMiddleware, tenantMiddleware, createIdempotencyMiddleware()],
-    },
-    async (request, reply) => {
-      const requestId = request.id;
-      const startTime = Date.now();
-      const { tenantId, userId } = request;
-
-      try {
-        const data = UpdateWordCloudSchema.parse(request.body);
-
-        // Find existing word cloud
-        const existingWordCloud = await prisma.wordCloud.findUnique({
-          where: {
-            id: data.id,
-            tenantId,
-          },
-        });
-
-        if (!existingWordCloud) {
-          logger.warn({
-            requestId,
-            message: 'Word cloud not found',
-            statusCode: 404,
-            durationMs: Date.now() - startTime,
-            wordCloudId: data.id,
-            tenantId,
-          });
-
-          return reply.code(404).send({
-            error: {
-              code: 'WORD_CLOUD_NOT_FOUND',
-              message: 'Word cloud not found',
-            },
-            requestId,
-          });
-        }
-
-        // Update word cloud
-        const updatedConfig = {
-          ...existingWordCloud.config,
-          ...data.config,
-        };
-
-        const wordCloud = await prisma.wordCloud.update({
-          where: {
-            id: data.id,
-            tenantId,
-          },
-          data: {
-            name: data.name || existingWordCloud.name,
-            config: updatedConfig,
-            version: {
-              increment: 1,
-            },
-          },
-          select: {
-            id: true,
-            name: true,
-            config: true,
-            status: true,
-            version: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        });
-
-        // Create new config version
-        await prisma.wordCloudConfigVersion.create({
-          data: {
-            wordCloudId: wordCloud.id,
-            versionNumber: wordCloud.version,
-            snapshot: updatedConfig,
-            createdById: userId,
-          },
-        });
-
-        const duration = Date.now() - startTime;
-
-        logger.info({
-          requestId,
-          message: 'Word cloud updated successfully',
-          statusCode: 200,
-          durationMs: duration,
-          tenantId,
-          userId,
-          wordCloudId: wordCloud.id,
-        });
-
-        return reply.code(200).send({
-          data: {
-            wordCloud,
-          },
-          requestId,
-        });
-      } catch (error) {
-        const duration = Date.now() - startTime;
-
-        if (error instanceof z.ZodError) {
-          logger.warn({
-            requestId,
-            message: 'Word cloud update validation failed',
-            statusCode: 400,
-            durationMs: duration,
-            errors: error.errors,
-          });
-
-          return reply.code(400).send({
-            error: {
-              code: 'VALIDATION_ERROR',
-              message: 'Invalid request data',
-              details: error.errors,
-            },
-            requestId,
-          });
-        }
-
-        logger.error({
-          requestId,
-          message: 'Failed to update word cloud',
-          statusCode: 500,
-          durationMs: duration,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-
-        return reply.code(500).send({
-          error: {
-            code: 'INTERNAL_ERROR',
-            message: 'Failed to update word cloud',
-          },
-          requestId,
-        });
-      }
-    },
-  );
-
-  // DELETE /api/v1/word-clouds - Delete word cloud
-  fastify.delete(
-    '/word-clouds',
-    {
-      preHandler: [authMiddleware, tenantMiddleware, createIdempotencyMiddleware()],
-    },
-    async (request, reply) => {
-      const requestId = request.id;
-      const startTime = Date.now();
-      const { tenantId } = request;
-
-      try {
-        const data = DeleteWordCloudSchema.parse(request.body);
-
-        // Find existing word cloud
-        const existingWordCloud = await prisma.wordCloud.findUnique({
-          where: {
-            id: data.id,
-            tenantId,
-          },
-        });
-
-        if (!existingWordCloud) {
-          logger.warn({
-            requestId,
-            message: 'Word cloud not found',
-            statusCode: 404,
-            durationMs: Date.now() - startTime,
-            wordCloudId: data.id,
-            tenantId,
-          });
-
-          return reply.code(404).send({
-            error: {
-              code: 'WORD_CLOUD_NOT_FOUND',
-              message: 'Word cloud not found',
-            },
-            requestId,
-          });
-        }
-
-        // Soft delete word cloud
-        await prisma.wordCloud.update({
-          where: {
-            id: data.id,
-            tenantId,
-          },
-          data: {
-            status: 'deleted',
-          },
-        });
-
-        const duration = Date.now() - startTime;
-
-        logger.info({
-          requestId,
-          message: 'Word cloud deleted successfully',
-          statusCode: 200,
-          durationMs: duration,
-          tenantId,
-          wordCloudId: data.id,
-        });
-
-        return reply.code(200).send({
-          data: {
-            message: 'Word cloud deleted successfully',
-          },
-          requestId,
-        });
-      } catch (error) {
-        const duration = Date.now() - startTime;
-
-        if (error instanceof z.ZodError) {
-          logger.warn({
-            requestId,
-            message: 'Word cloud deletion validation failed',
-            statusCode: 400,
-            durationMs: duration,
-            errors: error.errors,
-          });
-
-          return reply.code(400).send({
-            error: {
-              code: 'VALIDATION_ERROR',
-              message: 'Invalid request data',
-              details: error.errors,
-            },
-            requestId,
-          });
-        }
-
-        logger.error({
-          requestId,
-          message: 'Failed to delete word cloud',
-          statusCode: 500,
-          durationMs: duration,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-
-        return reply.code(500).send({
-          error: {
-            code: 'INTERNAL_ERROR',
-            message: 'Failed to delete word cloud',
-          },
-          requestId,
-        });
-      }
-    },
-  );
-
-  // GET /api/v1/word-clouds/:id - Get word cloud by ID
-  fastify.get(
-    '/word-clouds/:id',
-    {
-      preHandler: [authMiddleware, tenantMiddleware],
-    },
-    async (request, reply) => {
-      const requestId = request.id;
-      const startTime = Date.now();
-      const { tenantId } = request;
-      const { id } = request.params as { id: string };
-
-      try {
-        // Find word cloud
-        const wordCloud = await prisma.wordCloud.findUnique({
-          where: {
-            id,
-            tenantId,
-            status: {
-              not: 'deleted',
-            },
-          },
-          select: {
-            id: true,
-            name: true,
-            config: true,
-            status: true,
-            version: true,
-            createdAt: true,
-            updatedAt: true,
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-            _count: {
-              select: {
-                exports: true,
-              },
-            },
-          },
-        });
-
-        if (!wordCloud) {
-          logger.warn({
-            requestId,
-            message: 'Word cloud not found',
-            statusCode: 404,
-            durationMs: Date.now() - startTime,
-            wordCloudId: id,
-            tenantId,
-          });
-
-          return reply.code(404).send({
-            error: {
-              code: 'WORD_CLOUD_NOT_FOUND',
-              message: 'Word cloud not found',
-            },
-            requestId,
-          });
-        }
-
-        const duration = Date.now() - startTime;
-
-        logger.info({
-          requestId,
-          message: 'Word cloud retrieved successfully',
-          statusCode: 200,
-          durationMs: duration,
-          tenantId,
-          wordCloudId: id,
-        });
-
-        return reply.code(200).send({
-          data: {
-            wordCloud,
-          },
-          requestId,
-        });
-      } catch (error) {
-        const duration = Date.now() - startTime;
-
-        logger.error({
-          requestId,
-          message: 'Failed to retrieve word cloud',
-          statusCode: 500,
-          durationMs: duration,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-
-        return reply.code(500).send({
-          error: {
-            code: 'INTERNAL_ERROR',
-            message: 'Failed to retrieve word cloud',
-          },
-          requestId,
-        });
-      }
-    },
-  );
+// Types
+interface CreateWordCloudBody {
+  name: string;
+  description?: string;
+  config: WordCloudConfig;
 }
+
+interface UpdateWordCloudBody {
+  name?: string;
+  description?: string;
+  config?: WordCloudConfig;
+  status?: 'draft' | 'published' | 'archived';
+}
+
+interface WordCloudConfig {
+  words: Array<{ text: string; weight: number; color?: string }>;
+  width?: number;
+  height?: number;
+  backgroundColor?: string;
+  fontFamily?: string;
+  rotationRange?: [number, number];
+  colors?: string[];
+}
+
+interface AuthenticatedRequest extends FastifyRequest {
+  user: {
+    id: string;
+    tenantId: string;
+    role: string;
+  };
+}
+
+// Helper functions (extracted for maintainability)
+async function validateWordCloudOwnership(
+  wordCloudId: string,
+  tenantId: string
+): Promise<{ valid: boolean; wordCloud?: unknown }> {
+  const wordCloud = await prisma.wordCloud.findFirst({
+    where: {
+      id: wordCloudId,
+      tenantId,
+    },
+  });
+
+  return {
+    valid: !!wordCloud,
+    wordCloud: wordCloud ?? undefined,
+  };
+}
+
+async function createAuditLog(
+  tenantId: string,
+  userId: string,
+  action: string,
+  resource: string,
+  resourceId?: string,
+  changes?: Record<string, unknown>
+): Promise<void> {
+  await prisma.auditLog.create({
+    data: {
+      tenantId,
+      userId,
+      action,
+      resource,
+      resourceId,
+      changes: changes ?? undefined,
+    },
+  });
+}
+
+function buildWhereClause(
+  tenantId: string,
+  filters: { status?: string; search?: string }
+): Record<string, unknown> {
+  const where: Record<string, unknown> = { tenantId };
+
+  if (filters.status) {
+    where.status = filters.status;
+  }
+
+  if (filters.search) {
+    where.OR = [
+      { name: { contains: filters.search, mode: 'insensitive' } },
+      { description: { contains: filters.search, mode: 'insensitive' } },
+    ];
+  }
+
+  return where;
+}
+
+// Route handlers
+async function listWordClouds(
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+): Promise<FastifyReply> {
+  const { page, pageSize, status, search, sortBy, sortOrder } = listQuerySchema.parse(request.query);
+  const tenantId = request.user.tenantId;
+
+  log.debug({
+    message: 'Listing word clouds',
+    tenantId,
+    page,
+    pageSize,
+    status,
+    search,
+  });
+
+  const where = buildWhereClause(tenantId, { status, search });
+
+  const [wordClouds, total] = await Promise.all([
+    prisma.wordCloud.findMany({
+      where,
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      orderBy: { [sortBy]: sortOrder },
+      include: {
+        _count: {
+          select: { exports: true },
+        },
+      },
+    }),
+    prisma.wordCloud.count({ where }),
+  ]);
+
+  return reply.send({
+    data: wordClouds,
+    pagination: {
+      page,
+      pageSize,
+      totalItems: total,
+      totalPages: Math.ceil(total / pageSize),
+      hasNextPage: page * pageSize < total,
+      hasPreviousPage: page > 1,
+    },
+  });
+}
+
+async function getWordCloud(
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+): Promise<FastifyReply> {
+  const { id } = request.params as { id: string };
+  const tenantId = request.user.tenantId;
+
+  const wordCloud = await prisma.wordCloud.findFirst({
+    where: {
+      id,
+      tenantId,
+    },
+    include: {
+      configVersions: {
+        take: 10,
+        orderBy: { versionNumber: 'desc' },
+      },
+    },
+  });
+
+  if (!wordCloud) {
+    return reply.code(404).send({
+      error: 'Not Found',
+      message: 'Word cloud not found',
+      code: 'WORDCLOUD_NOT_FOUND',
+    });
+  }
+
+  return reply.send({ data: wordCloud });
+}
+
+async function createWordCloud(
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+): Promise<FastifyReply> {
+  const body = createWordCloudSchema.parse(request.body);
+  const userId = request.user.id;
+  const tenantId = request.user.tenantId;
+
+  log.info({
+    message: 'Creating word cloud',
+    tenantId,
+    userId,
+    name: body.name,
+  });
+
+  const wordCloud = await prisma.wordCloud.create({
+    data: {
+      tenantId,
+      userId,
+      name: body.name,
+      description: body.description,
+      config: body.config,
+      status: 'draft',
+    },
+  });
+
+  await createAuditLog(
+    tenantId,
+    userId,
+    'create',
+    'word_cloud',
+    wordCloud.id,
+    { new: wordCloud }
+  );
+
+  return reply.code(201).send({
+    data: wordCloud,
+    message: 'Word cloud created successfully',
+  });
+}
+
+async function updateWordCloud(
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+): Promise<FastifyReply> {
+  const { id } = request.params as { id: string };
+  const body = updateWordCloudSchema.parse(request.body);
+  const userId = request.user.id;
+  const tenantId = request.user.tenantId;
+
+  const { valid, wordCloud } = await validateWordCloudOwnership(id, tenantId);
+
+  if (!valid) {
+    return reply.code(404).send({
+      error: 'Not Found',
+      message: 'Word cloud not found',
+      code: 'WORDCLOUD_NOT_FOUND',
+    });
+  }
+
+  // Create a version snapshot if config is being updated
+  if (body.config) {
+    await prisma.wordCloudConfigVersion.create({
+      data: {
+        wordCloudId: id,
+        versionNumber: (wordCloud as { version: number }).version + 1,
+        snapshot: body.config,
+        createdById: userId,
+      },
+    });
+  }
+
+  const updatedWordCloud = await prisma.wordCloud.update({
+    where: { id },
+    data: {
+      ...body,
+      version: { increment: 1 },
+      updatedAt: new Date(),
+    },
+  });
+
+  await createAuditLog(
+    tenantId,
+    userId,
+    'update',
+    'word_cloud',
+    id,
+    { old: wordCloud, new: updatedWordCloud }
+  );
+
+  return reply.send({
+    data: updatedWordCloud,
+    message: 'Word cloud updated successfully',
+  });
+}
+
+async function deleteWordCloud(
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+): Promise<FastifyReply> {
+  const { id } = request.params as { id: string };
+  const userId = request.user.id;
+  const tenantId = request.user.tenantId;
+
+  const { valid, wordCloud } = await validateWordCloudOwnership(id, tenantId);
+
+  if (!valid) {
+    return reply.code(404).send({
+      error: 'Not Found',
+      message: 'Word cloud not found',
+      code: 'WORDCLOUD_NOT_FOUND',
+    });
+  }
+
+  await prisma.wordCloud.delete({
+    where: { id },
+  });
+
+  await createAuditLog(
+    tenantId,
+    userId,
+    'delete',
+    'word_cloud',
+    id,
+    { old: wordCloud }
+  );
+
+  return reply.send({
+    message: 'Word cloud deleted successfully',
+  });
+}
+
+async function publishWordCloud(
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+): Promise<FastifyReply> {
+  const { id } = request.params as { id: string };
+  const userId = request.user.id;
+  const tenantId = request.user.tenantId;
+
+  const { valid, wordCloud } = await validateWordCloudOwnership(id, tenantId);
+
+  if (!valid) {
+    return reply.code(404).send({
+      error: 'Not Found',
+      message: 'Word cloud not found',
+      code: 'WORDCLOUD_NOT_FOUND',
+    });
+  }
+
+  // Generate embed ID if not exists
+  const embedId = (wordCloud as { embedId?: string }).embedId ?? 
+    `embed_${Buffer.from(id).toString('base64url')}`;
+
+  const updatedWordCloud = await prisma.wordCloud.update({
+    where: { id },
+    data: {
+      status: 'published',
+      embedId,
+      version: { increment: 1 },
+      updatedAt: new Date(),
+    },
+  });
+
+  await createAuditLog(
+    tenantId,
+    userId,
+    'publish',
+    'word_cloud',
+    id,
+    { old: wordCloud, new: updatedWordCloud }
+  );
+
+  return reply.send({
+    data: updatedWordCloud,
+    message: 'Word cloud published successfully',
+  });
+}
+
+// Register routes
+export async function wordCloudRoutes(fastify: FastifyInstance): Promise<void> {
+  // Apply middleware
+  fastify.addHook('preHandler', requireAuth);
+  fastify.addHook('preHandler', requireTenant);
+  fastify.addHook('preHandler', rateLimitMiddleware);
+
+  // List word clouds
+  fastify.get('/', listWordClouds);
+
+  // Get single word cloud
+  fastify.get('/:id', getWordCloud);
+
+  // Create word cloud
+  fastify.post('/', createWordCloud);
+
+  // Update word cloud
+  fastify.patch('/:id', updateWordCloud);
+
+  // Delete word cloud
+  fastify.delete('/:id', deleteWordCloud);
+
+  // Publish word cloud
+  fastify.post('/:id/publish', publishWordCloud);
+
+  log.info({ message: 'Word cloud routes registered' });
+}
+
+export default wordCloudRoutes;

@@ -1,3 +1,4 @@
+// src/types/entities.ts
 /**
  * Core entity types for the Word Cloud Analytics Platform.
  * These types map to the database schema and are used throughout the application.
@@ -88,83 +89,97 @@ export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export interface Job {
   id: string;
+  tenantId: string;
   type: JobType;
-  payload: Record<string, any>;
   status: JobStatus;
+  payload: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  error?: string;
   attempts: number;
   maxAttempts: number;
   scheduledAt: Date;
   startedAt?: Date;
   completedAt?: Date;
-  error?: string;
-  tenantId: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export type EventType = 'view' | 'click' | 'share' | 'export' | 'embed_load';
+export type EventSource = 'web' | 'api' | 'embed';
+
+export interface AnalyticsEvent {
+  id: string;
+  tenantId: string;
+  wordCloudId?: string;
+  eventType: EventType;
+  source: EventSource;
+  metadata: Record<string, unknown>;
+  ipAddress?: string;
+  userAgent?: string;
+  referrer?: string;
+  createdAt: Date;
+}
+
+export interface AuditLog {
+  id: string;
+  tenantId: string;
+  userId: string;
+  action: string;
+  resource: string;
+  resourceId?: string;
+  changes?: Record<string, { old: unknown; new: unknown }>;
+  ipAddress?: string;
+  userAgent?: string;
+  createdAt: Date;
 }
 
 export interface TenantSetting {
   id: string;
   tenantId: string;
   key: string;
-  value: Record<string, any>;
+  value: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
-export interface AuditLog {
+export interface Notification {
   id: string;
-  entityType: string;
-  entityId: string;
-  fieldName: string;
-  oldValue: any;
-  newValue: any;
-  changedById: string;
-  changedAt: Date;
-  ipAddress?: string;
   tenantId: string;
+  userId: string;
+  type: 'info' | 'warning' | 'error' | 'success';
+  title: string;
+  message: string;
+  read: boolean;
+  actionUrl?: string;
   createdAt: Date;
 }
 
-// Analytics types (stored in ClickHouse)
-export interface ClickEvent {
+export interface Webhook {
   id: string;
-  wordCloudId: string;
-  sessionId: string;
-  word: string;
-  weight: number;
-  x: number;
-  y: number;
-  timestamp: Date;
-  referrer?: string;
-  userAgent?: string;
-  country?: string;
-  deviceType?: string;
+  tenantId: string;
+  url: string;
+  secret: string;
+  events: string[];
+  active: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-export interface AnalyticsAggregation {
-  wordCloudId: string;
-  word: string;
-  clickCount: number;
-  uniqueSessions: number;
-  avgDwellTime?: number;
-  date: Date;
+export interface ApiKey {
+  id: string;
+  tenantId: string;
+  userId: string;
+  name: string;
+  keyHash: string;
+  keyPrefix: string;
+  permissions: string[];
+  lastUsedAt?: Date;
+  expiresAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-// API response types
-export interface ApiResponse<T> {
-  data: T;
-  requestId: string;
-}
-
-export interface ApiErrorResponse {
-  error: {
-    code: string;
-    message: string;
-    details?: any[];
-  };
-  requestId: string;
-}
-
+// API Response Types
 export interface PaginatedResponse<T> {
   data: T[];
   pagination: {
@@ -172,8 +187,91 @@ export interface PaginatedResponse<T> {
     pageSize: number;
     totalItems: number;
     totalPages: number;
-    hasNext: boolean;
-    hasPrev: boolean;
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
   };
-  requestId: string;
+}
+
+export interface ApiErrorResponse {
+  error: string;
+  message: string;
+  code: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ApiSuccessResponse<T> {
+  data: T;
+  message?: string;
+}
+
+// Form Types
+export interface CreateWordCloudInput {
+  tenantId: string;
+  userId: string;
+  name: string;
+  description?: string;
+  config: WordCloudConfig;
+}
+
+export interface UpdateWordCloudInput {
+  name?: string;
+  description?: string;
+  config?: WordCloudConfig;
+  status?: WordCloudStatus;
+}
+
+export interface RegisterUserInput {
+  email: string;
+  password: string;
+  name?: string;
+  tenantId: string;
+}
+
+export interface LoginInput {
+  email: string;
+  password: string;
+}
+
+export interface AuthResponse {
+  user: Omit<User, 'passwordHash'>;
+  accessToken: string;
+  refreshToken: string;
+}
+
+// Analytics Types
+export interface WordCloudAnalytics {
+  wordCloudId: string;
+  totalViews: number;
+  totalClicks: number;
+  totalShares: number;
+  totalExports: number;
+  viewsByDay: Array<{ date: string; count: number }>;
+  topReferrers: Array<{ referrer: string; count: number }>;
+  topCountries: Array<{ country: string; count: number }>;
+  deviceBreakdown: Array<{ device: string; count: number }>;
+}
+
+export interface DashboardStats {
+  totalWordClouds: number;
+  totalViews: number;
+  totalExports: number;
+  activeEmbeds: number;
+  viewsTrend: number;
+  exportsTrend: number;
+}
+
+// Embed Types
+export interface EmbedConfig {
+  wordCloudId: string;
+  width: number;
+  height: number;
+  showControls: boolean;
+  theme: 'light' | 'dark' | 'auto';
+  backgroundColor?: string;
+}
+
+export interface EmbedScript {
+  script: string;
+  iframeUrl: string;
+  embedCode: string;
 }

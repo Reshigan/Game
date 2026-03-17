@@ -1,3 +1,4 @@
+// src/lib/utils/logger.ts
 import pino from 'pino';
 
 export interface LogContext {
@@ -5,8 +6,26 @@ export interface LogContext {
   message: string;
   statusCode?: number;
   durationMs?: number;
-  error?: string | Error | Record<string, any>;
-  [key: string]: any;
+  error?: string | Error | ErrorInfo | Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface ErrorInfo {
+  message: string;
+  stack?: string;
+  code?: string;
+  name?: string;
+}
+
+export interface RequestInfo {
+  method: string;
+  url: string;
+  headers: Record<string, unknown>;
+  query?: Record<string, unknown>;
+}
+
+export interface ResponseInfo {
+  statusCode: number;
 }
 
 const isProduction = process.env.NODE_ENV === 'production';
@@ -48,13 +67,13 @@ export const logger = pino({
   timestamp: pino.stdTimeFunctions.isoTime,
   serializers: {
     error: pino.stdSerializers.err,
-    request: (req: any) => ({
+    request: (req: RequestInfo): RequestInfo => ({
       method: req.method,
       url: req.url,
-      headers: sanitizeHeaders(req.headers),
+      headers: sanitizeHeaders(req.headers as Record<string, unknown>),
       query: req.query,
     }),
-    response: (res: any) => ({
+    response: (res: ResponseInfo): ResponseInfo => ({
       statusCode: res.statusCode,
     }),
   },
@@ -73,7 +92,7 @@ export const logger = pino({
 /**
  * Sanitize headers to remove sensitive information.
  */
-function sanitizeHeaders(headers: Record<string, any>): Record<string, any> {
+function sanitizeHeaders(headers: Record<string, unknown>): Record<string, unknown> {
   const sanitized = { ...headers };
   const sensitiveHeaders = [
     'authorization',
@@ -85,7 +104,7 @@ function sanitizeHeaders(headers: Record<string, any>): Record<string, any> {
   ];
 
   for (const header of sensitiveHeaders) {
-    if (sanitized[header]) {
+    if (sanitized[header] !== undefined) {
       sanitized[header] = '[REDACTED]';
     }
   }
@@ -94,77 +113,88 @@ function sanitizeHeaders(headers: Record<string, any>): Record<string, any> {
 }
 
 /**
- * Audit logger for sensitive operations.
- * These logs should be retained for compliance requirements.
+ * Log levels with typed context.
  */
-export const auditLogger = {
-  logUserAction(
-    action: string,
-    userId: string,
-    tenantId: string,
-    details: Record<string, any>
-  ): void {
-    logger.info({
-      audit: true,
-      action,
-      userId,
-      tenantId,
-      timestamp: new Date().toISOString(),
-      ...details,
-    });
+export const log = {
+  info: (context: LogContext): void => {
+    logger.info(context, context.message);
   },
 
-  logDataAccess(
-    resource: string,
-    resourceId: string,
-    operation: 'READ' | 'CREATE' | 'UPDATE' | 'DELETE',
-    userId: string,
-    tenantId: string
-  ): void {
-    logger.info({
-      audit: true,
-      category: 'DATA_ACCESS',
-      resource,
-      resourceId,
-      operation,
-      userId,
-      tenantId,
-      timestamp: new Date().toISOString(),
-    });
+  warn: (context: LogContext): void => {
+    logger.warn(context, context.message);
   },
 
-  logAuthEvent(
-    event: 'LOGIN' | 'LOGOUT' | 'TOKEN_REFRESH' | 'PASSWORD_CHANGE' | 'PASSWORD_RESET',
-    userId: string,
-    tenantId: string | null,
-    success: boolean,
-    metadata?: Record<string, any>
-  ): void {
-    logger.info({
-      audit: true,
-      category: 'AUTH',
-      event,
-      userId,
-      tenantId,
-      success,
-      timestamp: new Date().toISOString(),
-      ...metadata,
-    });
+  error: (context: LogContext): void => {
+    logger.error(context, context.message);
   },
 
-  logSecurityEvent(
-    event: string,
-    severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL',
-    details: Record<string, any>
-  ): void {
-    const logMethod = severity === 'CRITICAL' || severity === 'HIGH' ? 'error' : 'warn';
-    logger[logMethod]({
+  debug: (context: LogContext): void => {
+    if (!isProduction) {
+      logger.debug(context, context.message);
+    }
+  },
+
+  /**
+   * Audit log for SOX compliance.
+   * These logs must be immutable and retained for compliance requirements.
+   */
+  audit: (context: Omit<LogContext, 'message'> & { 
+    message: string; 
+    action: string; 
+    actor: string; 
+    resource: string;
+    outcome: 'success' | 'failure';
+  }): void => {
+    logger.info({
+      ...context,
       audit: true,
-      category: 'SECURITY',
-      event,
-      severity,
       timestamp: new Date().toISOString(),
-      ...details,
-    });
+    }, context.message);
   },
 };
+
+/**
+ * Create a child logger with additional context.
+ */
+export function createLogger(context: Record<string, unknown>): ReturnType<typeof logger.child> {
+  return logger.child(context);
+}
+
+/**
+ * Express/Fastify middleware for request logging.
+ */
+export function requestLogger() {
+  return {
+    onRequest: (req: { method: string; url: string; headers: Record<string, unknown> }) => {
+      logger.debug({
+        message: 'Incoming request',
+        method: req.method,
+        url: req.url,
+      });
+    },
+    onResponse: (req: { method: string; url: string }, res: { statusCode: number }, responseTime: number) => {
+      logger.info({
+        message: 'Request completed',
+        method: req.method,
+        url: req.url,
+        statusCode: res.statusCode,
+        durationMs: responseTime,
+      });
+    },
+    onError: (req: { method: string; url: string }, res: { statusCode: number }, error: Error) => {
+      logger.error({
+        message: 'Request failed',
+        method: req.method,
+        url: req.url,
+        statusCode: res.statusCode,
+        error: {
+          message: error.message,
+          stack: error.stack,
+          name: error.name,
+        },
+      });
+    },
+  };
+}
+
+export default logger;
