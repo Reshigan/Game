@@ -1,66 +1,50 @@
-import { FastifyInstance } from 'fastify';
-import { prisma } from '@/lib/db/client';
-import { redis } from '@/lib/cache/client';
-import { logger } from '@/lib/utils/logger';
+import { NextRequest, NextResponse } from 'next/server';
+import { createId } from '@paralleldrive/cuid2';
+import { createLogger } from '@/lib/logger';
+import { checkHealth } from '@/lib/health';
 
-export async function healthRoute(fastify: FastifyInstance) {
-  fastify.get('/health', async (request, reply) => {
-    const requestId = request.id;
-    const startTime = Date.now();
-
-    try {
-      // Check database connection
-      const dbStatus = await prisma.$queryRaw`SELECT 1 as result;`
-        .then(() => 'ok')
-        .catch(() => 'error');
-
-      // Check Redis connection
-      const cacheStatus = await redis.ping()
-        .then(() => 'ok')
-        .catch(() => 'error');
-
-      const uptime = process.uptime();
-      const duration = Date.now() - startTime;
-
-      const response = {
-        status: 'healthy',
-        version: process.env.npm_package_version || '1.0.0',
-        uptime,
-        dependencies: {
-          db: dbStatus,
-          cache: cacheStatus,
-        },
-      };
-
-      logger.info({
-        requestId,
-        message: 'Health check completed',
-        statusCode: 200,
-        durationMs: duration,
-        dependencies: response.dependencies,
-      });
-
-      return reply.code(200).send(response);
-    } catch (error) {
-      const duration = Date.now() - startTime;
-
-      logger.error({
-        requestId,
-        message: 'Health check failed',
-        statusCode: 503,
-        durationMs: duration,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      });
-
-      return reply.code(503).send({
-        status: 'unhealthy',
-        version: process.env.npm_package_version || '1.0.0',
-        uptime: process.uptime(),
-        dependencies: {
-          db: 'error',
-          cache: 'error',
-        },
-      });
-    }
+export async function GET(request: NextRequest) {
+  const requestId = request.headers.get('X-Request-ID') || createId();
+  const logger = createLogger(requestId);
+  
+  logger.info('api', 'Health check requested', {
+    method: 'GET',
+    path: '/api/v1/health',
+    userAgent: request.headers.get('User-Agent'),
   });
+
+  try {
+    const healthStatus = await checkHealth(requestId);
+    
+    const statusCode = healthStatus.status === 'healthy' ? 200 : 
+                       healthStatus.status === 'degraded' ? 200 : 503;
+    
+    const response = NextResponse.json({
+      data: healthStatus,
+      requestId,
+    }, { status: statusCode });
+
+    // Add required headers
+    response.headers.set('X-Request-ID', requestId);
+    response.headers.set('API-Version', '1.0');
+    response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    
+    logger.info('api', 'Health check completed', {
+      status: healthStatus.status,
+      duration: logger.getDuration(),
+    });
+
+    return response;
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error('Unknown error during health check');
+    logger.fatal('system', 'Health check failed catastrophically', err);
+    
+    return NextResponse.json({
+      error: {
+        code: 'HEALTH_CHECK_FAILED',
+        message: 'Health check failed',
+        requestId,
+      },
+    }, { status: 503 });
+  }
 }

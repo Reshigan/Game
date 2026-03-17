@@ -1,6 +1,7 @@
-import React, { forwardRef, InputHTMLAttributes, useId } from 'react';
+import React, { forwardRef } from 'react';
+import { cn } from '@/lib/utils';
 
-interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
   hint?: string;
@@ -8,58 +9,61 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   rightIcon?: React.ReactNode;
 }
 
-export const Input = forwardRef<HTMLInputElement, InputProps>(
-  ({ label, error, hint, leftIcon, rightIcon, className = '', id: providedId, ...props }, ref) => {
-    const generatedId = useId();
-    const id = providedId || generatedId;
-    const errorId = `${id}-error`;
-    const hintId = `${id}-hint`;
-
+const Input = forwardRef<HTMLInputElement, InputProps>(
+  ({ className, label, error, hint, leftIcon, rightIcon, id, ...props }, ref) => {
+    const inputId = id || `input-${Math.random().toString(36).substr(2, 9)}`;
+    const errorId = error ? `${inputId}-error` : undefined;
+    const hintId = hint ? `${inputId}-hint` : undefined;
+    
     return (
       <div className="w-full">
         {label && (
-          <label htmlFor={id} className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+          <label
+            htmlFor={inputId}
+            className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1.5"
+          >
             {label}
-            {props.required && <span className="text-red-500 ml-1" aria-label="required">*</span>}
           </label>
         )}
         <div className="relative">
           {leftIcon && (
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <span className="text-gray-400">{leftIcon}</span>
+              <span className="text-slate-400 dark:text-slate-500">{leftIcon}</span>
             </div>
           )}
           <input
             ref={ref}
-            id={id}
-            className={`
-              w-full rounded-lg border bg-white dark:bg-gray-800 text-gray-900 dark:text-white
-              placeholder-gray-500 dark:placeholder-gray-400
-              focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
-              disabled:bg-gray-100 disabled:dark:bg-gray-700 disabled:cursor-not-allowed
-              ${leftIcon ? 'pl-10' : 'pl-4'}
-              ${rightIcon ? 'pr-10' : 'pr-4'}
-              py-2
-              ${error ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-600'}
-              ${className}
-            `}
+            id={inputId}
+            className={cn(
+              'w-full rounded-lg border bg-white dark:bg-slate-800 text-slate-900 dark:text-white',
+              'focus:outline-none focus:ring-2 focus:ring-offset-0',
+              'disabled:opacity-50 disabled:cursor-not-allowed',
+              'transition-colors duration-200',
+              leftIcon ? 'pl-10' : 'pl-4',
+              rightIcon ? 'pr-10' : 'pr-4',
+              'py-2.5',
+              error
+                ? 'border-red-500 focus:ring-red-500 focus:border-red-500'
+                : 'border-slate-300 dark:border-slate-600 focus:ring-indigo-500 focus:border-indigo-500',
+              className
+            )}
             aria-invalid={error ? 'true' : 'false'}
             aria-describedby={error ? errorId : hint ? hintId : undefined}
             {...props}
           />
           {rightIcon && (
             <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
-              <span className="text-gray-400">{rightIcon}</span>
+              <span className="text-slate-400 dark:text-slate-500">{rightIcon}</span>
             </div>
           )}
         </div>
         {error && (
-          <p id={errorId} className="mt-1 text-sm text-red-600 dark:text-red-400" role="alert">
+          <p id={errorId} className="mt-1.5 text-sm text-red-600 dark:text-red-400" role="alert">
             {error}
           </p>
         )}
         {hint && !error && (
-          <p id={hintId} className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          <p id={hintId} className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
             {hint}
           </p>
         )}
@@ -69,3 +73,5 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
 );
 
 Input.displayName = 'Input';
+
+export { Input };

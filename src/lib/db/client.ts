@@ -1,127 +1,50 @@
-// src/lib/db/client.ts
-import { PrismaClient, Prisma } from '@prisma/client';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+import * as schema from './schema';
 
-declare global {
-  // eslint-disable-next-line no-var
-  var prisma: PrismaClient | undefined;
+// Validate required environment variables
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  throw new Error('DATABASE_URL environment variable is required');
 }
 
-/**
- * Prisma client singleton with connection pooling.
- * Prevents multiple connections in development hot reload.
- */
-export const prisma =
-  globalThis.prisma ||
-  new PrismaClient({
-    log: process.env.NODE_ENV === 'development' 
-      ? ['query', 'error', 'warn'] 
-      : ['error'],
-    errorFormat: 'pretty',
-    datasources: {
-      db: {
-        url: process.env.DATABASE_URL,
-      },
-    },
-  });
+// Connection configuration
+const connectionString = DATABASE_URL;
+const isProduction = process.env.NODE_ENV === 'production';
 
-if (process.env.NODE_ENV !== 'production') {
-  globalThis.prisma = prisma;
-}
+// Create connection with proper pooling
+const client = postgres(connectionString, {
+  max: isProduction ? 20 : 5,
+  idle_timeout: 20,
+  connect_timeout: 10,
+  // Prepare statements for better performance
+  prepare: true,
+  // Enable SSL in production
+  ssl: isProduction ? 'require' : false,
+  // Transform undefined to null for consistency
+  transform: {
+    undefined: null,
+  },
+});
 
-/**
- * Graceful shutdown handler.
- * Ensures all connections are properly closed.
- */
-export async function disconnectDatabase(): Promise<void> {
-  await prisma.$disconnect();
-}
+// Create Drizzle ORM instance
+export const db = drizzle(client, { schema });
 
-/**
- * Health check for database connection.
- */
-export async function checkDatabaseConnection(): Promise<{
-  status: 'ok' | 'error';
-  latency?: number;
-  error?: string;
-}> {
-  const start = Date.now();
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  await client.end();
+});
+
+process.on('SIGINT', async () => {
+  await client.end();
+});
+
+// Health check function
+export async function checkDatabaseConnection(): Promise<boolean> {
   try {
-    await prisma.$queryRaw`SELECT 1`;
-    return {
-      status: 'ok',
-      latency: Date.now() - start,
-    };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown database error';
-    return {
-      status: 'error',
-      error: errorMessage,
-    };
+    await client`SELECT 1`;
+    return true;
+  } catch {
+    return false;
   }
 }
-
-/**
- * Transaction helper with automatic retry on serialization failures.
- */
-export async function withRetryTransaction<T>(
-  fn: (tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use'>) => Promise<T>,
-  maxRetries = 3
-): Promise<T> {
-  let lastError: Error | undefined;
-  
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await prisma.$transaction(fn);
-    } catch (error: unknown) {
-      // Retry on serialization failure (concurrent modifications)
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
-        lastError = error;
-        // Exponential backoff
-        await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)));
-        continue;
-      }
-      throw error;
-    }
-  }
-  
-  throw lastError ?? new Error('Transaction failed after max retries');
-}
-
-/**
- * Batch insert helper for bulk operations.
- */
-export async function batchInsert<T extends Record<string, unknown>>(
-  model: string,
-  records: T[],
-  batchSize = 100
-): Promise<number> {
-  let inserted = 0;
-  
-  for (let i = 0; i < records.length; i += batchSize) {
-    const batch = records.slice(i, i + batchSize);
-    // Use Prisma's createMany for batch inserts
-    // This is a generic helper - specific models should use their own typed methods
-    inserted += batch.length;
-  }
-  
-  return inserted;
-}
-
-/**
- * Connection pool status for monitoring.
- */
-export async function getConnectionPoolStatus(): Promise<{
-  active: number;
-  idle: number;
-  waiting: number;
-}> {
-  // This would typically query pg_stat_activity in PostgreSQL
-  // For now, return placeholder values
-  return {
-    active: 0,
-    idle: 0,
-    waiting: 0,
-  };
-}
-
-export type { PrismaClient };

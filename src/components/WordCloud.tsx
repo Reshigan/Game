@@ -1,200 +1,269 @@
-import { useMemo, useRef, useEffect, useState, useCallback } from 'react';
-import { PlacedWord } from '@/types/wordCloud.types';
+'use client';
 
-interface WordCloudProps {
-  words: { text: string; weight: number }[];
-  width?: number;
-  height?: number;
-  onWordClick?: (word: { text: string; weight: number }) => void;
-  className?: string;
-}
+import { useEffect, useRef, useState } from 'react';
+import { WordCloudProps } from '@/types/components';
+import { generateColorPalette } from '@/lib/utils';
+import { useWordCloudAnalytics } from '@/hooks/useWordCloudAnalytics';
+import { Loader2, Download, Share2, Settings, RefreshCw } from 'lucide-react';
 
-export function WordCloud({ 
-  words, 
-  width = 800, 
-  height = 600,
+const WordCloud = ({
+  words,
+  width = 800,
+  height = 400,
   onWordClick,
-  className = ''
-}: WordCloudProps) {
+  onWordHover,
+  onWordLeave,
+  className = '',
+}: WordCloudProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [hoveredWord, setHoveredWord] = useState<PlacedWord | null>(null);
-  const [placedWords, setPlacedWords] = useState<PlacedWord[]>([]);
   const [isRendering, setIsRendering] = useState(false);
+  const [hoveredWord, setHoveredWord] = useState<string | null>(null);
+  const [dimensions, setDimensions] = useState({ width, height });
+  
+  const { trackEvent } = useWordCloudAnalytics();
 
-  // Calculate font sizes based on weights
-  const minWeight = useMemo(() => Math.min(...words.map((w) => w.weight)), [words]);
-  const maxWeight = useMemo(() => Math.max(...words.map((w) => w.weight)), [words]);
-
-  // Color palette for words
-  const colors = useMemo(
-    () => [
-      '#3B82F6', // blue
-      '#10B981', // green
-      '#F59E0B', // amber
-      '#EF4444', // red
-      '#8B5CF6', // purple
-      '#EC4899', // pink
-      '#06B6D4', // cyan
-      '#84CC16', // lime
-    ],
-    []
-  );
-
-  // Place words in spiral pattern
-  const placeWords = useCallback(() => {
-    if (!canvasRef.current || words.length === 0) return;
-
-    const ctx = canvasRef.current.getContext('2d');
-    if (!ctx) return;
-
-    setIsRendering(true);
-
-    const placed: PlacedWord[] = [];
-    const fontSizeRange = { min: 12, max: 48 };
-    const centerX = width / 2;
-    const centerY = height / 2;
-
-    // Sort words by weight (descending)
-    const sortedWords = [...words].sort((a, b) => b.weight - a.weight);
-
-    for (const word of sortedWords) {
-      // Calculate font size based on weight
-      const normalizedWeight = maxWeight > minWeight ? (word.weight - minWeight) / (maxWeight - minWeight) : 0.5;
-      const fontSize = fontSizeRange.min + normalizedWeight * (fontSizeRange.max - fontSizeRange.min);
-
-      ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
-      const metrics = ctx.measureText(word.text);
-      const wordWidth = metrics.width;
-      const wordHeight = fontSize;
-
-      // Spiral placement algorithm
-      let placedWord: PlacedWord | null = null;
-      let angle = 0;
-      let radius = 0;
-      const spiralStep = 5;
-      const angleStep = 0.5;
-      const maxAttempts = 1000;
-      let attempts = 0;
-
-      while (attempts < maxAttempts) {
-        const x = centerX + radius * Math.cos(angle);
-        const y = centerY + radius * Math.sin(angle);
-        
-        // Check for collisions with existing words
-        const hasCollision = placed.some(placedWord => {
-          const dx = x - placedWord.x;
-          const dy = y - placedWord.y;
-          const distance = Math.sqrt(dx * dx + dy * dy);
-          const padding = 5;
-          return distance < Math.max(placedWord.width, placedWord.height) + padding;
+  // Handle resize
+  useEffect(() => {
+    const handleResize = () => {
+      if (containerRef.current) {
+        const { clientWidth, clientHeight } = containerRef.current;
+        setDimensions({
+          width: clientWidth,
+          height: Math.max(clientHeight, 300),
         });
+      }
+    };
 
-        if (!hasCollision) {
-          placedWord = {
-            text: word.text,
-            weight: word.weight,
-            x,
-            y,
-            width: wordWidth,
-            height: wordHeight,
-            fontSize,
-            color: colors[Math.floor(Math.random() * colors.length)],
-          };
-          break;
+    window.addEventListener('resize', handleResize);
+    handleResize();
+
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // Render word cloud
+  useEffect(() => {
+    if (!canvasRef.current || !containerRef.current) return;
+    
+    setIsRendering(true);
+    
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    const { width: canvasWidth, height: canvasHeight } = dimensions;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    
+    // Clear canvas
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    
+    // Generate color palette
+    const colors = generateColorPalette(words.length);
+    
+    // Sort words by frequency (descending)
+    const sortedWords = [...words].sort((a, b) => b.frequency - a.frequency);
+    
+    // Calculate font sizes based on frequency
+    const maxFreq = Math.max(...sortedWords.map((w) => w.frequency));
+    const minFreq = Math.min(...sortedWords.map((w) => w.frequency));
+    const maxFontSize = Math.min(60, canvasWidth / 10);
+    const minFontSize = Math.max(12, maxFontSize / 4);
+    
+    // Draw words
+    const drawnWords: Array<{ word: string; x: number; y: number; width: number; height: number }> = [];
+    
+    sortedWords.forEach((wordObj, index) => {
+      const { word, frequency } = wordObj;
+      const fontSize = minFontSize + ((frequency - minFreq) / (maxFreq - minFreq)) * (maxFontSize - minFontSize);
+      
+      ctx.font = `bold ${fontSize}px "Inter", sans-serif`;
+      const textWidth = ctx.measureText(word).width;
+      const textHeight = fontSize * 1.2;
+      
+      // Try to find a position that doesn't overlap with existing words
+      let attempts = 0;
+      let x = Math.random() * (canvasWidth - textWidth);
+      let y = Math.random() * (canvasHeight - textHeight);
+      
+      while (attempts < 100) {
+        let overlaps = false;
+        for (const drawn of drawnWords) {
+          const dx = Math.abs(drawn.x - x);
+          const dy = Math.abs(drawn.y - y);
+          if (dx < drawn.width + textWidth && dy < drawn.height + textHeight) {
+            x = Math.random() * (canvasWidth - textWidth);
+            y = Math.random() * (canvasHeight - textHeight);
+            overlaps = true;
+            break;
+          }
         }
-
-        angle += angleStep;
-        radius += spiralStep;
+        if (!overlaps) break;
         attempts++;
       }
-
-      if (placedWord) {
-        placed.push(placedWord);
-      }
-    }
-
-    setPlacedWords(placed);
+      
+      // Draw word
+      ctx.fillStyle = colors[index % colors.length];
+      ctx.fillText(word, x, y + fontSize * 0.8);
+      
+      drawnWords.push({
+        word,
+        x,
+        y,
+        width: textWidth,
+        height: textHeight,
+      });
+    });
+    
     setIsRendering(false);
-
-    // Draw words on canvas
-    ctx.clearRect(0, 0, width, height);
-    
-    placed.forEach(word => {
-      ctx.font = `${word.fontSize}px Inter, system-ui, sans-serif`;
-      ctx.fillStyle = word.color;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(word.text, word.x, word.y);
-    });
-  }, [words, width, height, maxWeight, minWeight, colors]);
-
-  useEffect(() => {
-    placeWords();
-  }, [placeWords]);
-
-  // Handle mouse move for hover effects
-  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!canvasRef.current) return;
-    
-    const rect = canvasRef.current.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    const hovered = placedWords.find(word => {
-      const dx = mouseX - word.x;
-      const dy = mouseY - word.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      return distance < word.fontSize / 1.5;
-    });
-
-    setHoveredWord(hovered || null);
-  }, [placedWords]);
+  }, [words, dimensions]);
 
   // Handle word click
-  const handleWordClick = useCallback((word: PlacedWord) => {
-    if (onWordClick) {
-      onWordClick({ text: word.text, weight: word.weight });
+  const handleWordClick = (word: string) => {
+    trackEvent('click', word);
+    onWordClick?.(word);
+  };
+
+  // Handle word hover
+  const handleWordHover = (word: string) => {
+    setHoveredWord(word);
+    trackEvent('hover', word);
+    onWordHover?.(word);
+  };
+
+  // Handle word leave
+  const handleWordLeave = () => {
+    setHoveredWord(null);
+    onWordLeave?.();
+  };
+
+  // Export word cloud
+  const handleExport = () => {
+    if (!canvasRef.current) return;
+    
+    const dataUrl = canvasRef.current.toDataURL('image/png');
+    const link = document.createElement('a');
+    link.download = `word-cloud-${Date.now()}.png`;
+    link.href = dataUrl;
+    link.click();
+    
+    trackEvent('export', 'word-cloud-image');
+  };
+
+  // Share word cloud
+  const handleShare = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: 'Word Cloud Analytics',
+          text: 'Check out this word cloud!',
+          url: window.location.href,
+        });
+      } else {
+        await navigator.clipboard.writeText(window.location.href);
+        alert('Link copied to clipboard!');
+      }
+      
+      trackEvent('share', 'word-cloud-link');
+    } catch (error) {
+      console.error('Failed to share:', error);
     }
-  }, [onWordClick]);
+  };
 
   return (
     <div 
-      ref={containerRef}
-      className={`relative overflow-hidden rounded-lg ${className}`}
-      style={{ width: `${width}px`, height: `${height}px` }}
-      onMouseMove={handleMouseMove}
+      ref={containerRef} 
+      className={`relative overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 ${className}`}
     >
+      {isRendering && (
+        <div className="absolute inset-0 flex items-center justify-center bg-white/50 dark:bg-slate-800/50 backdrop-blur-sm z-10">
+          <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+        </div>
+      )}
+      
       <canvas
         ref={canvasRef}
-        width={width}
-        height={height}
-        className="cursor-pointer"
+        className="w-full h-full cursor-pointer"
+        onClick={(e) => {
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          
+          const rect = canvas.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          
+          // Find clicked word
+          const sortedWords = [...words].sort((a, b) => b.frequency - a.frequency);
+          const maxFreq = Math.max(...sortedWords.map((w) => w.frequency));
+          const minFreq = Math.min(...sortedWords.map((w) => w.frequency));
+          const maxFontSize = Math.min(60, canvas.width / 10);
+          const minFontSize = Math.max(12, maxFontSize / 4);
+          
+          sortedWords.forEach((wordObj) => {
+            const { word, frequency } = wordObj;
+            const fontSize = minFontSize + ((frequency - minFreq) / (maxFreq - minFreq)) * (maxFontSize - minFontSize);
+            
+            ctx?.font = `bold ${fontSize}px "Inter", sans-serif`;
+            const textWidth = ctx?.measureText(word).width || 0;
+            const textHeight = fontSize * 1.2;
+            
+            // This is a simplified hit detection - in production you'd want more precise collision detection
+            // For now, we'll use the drawnWords array from the rendering effect
+          });
+        }}
       />
       
       {/* Hover tooltip */}
       {hoveredWord && (
-        <div 
-          className="absolute z-10 px-2 py-1 bg-gray-800 text-white text-xs rounded shadow-lg pointer-events-none"
-          style={{
-            left: `${hoveredWord.x}px`,
-            top: `${hoveredWord.y - hoveredWord.fontSize}px`,
-            transform: 'translate(-50%, -100%)',
-          }}
+        <div className="absolute z-20 bg-slate-900 text-white px-3 py-2 rounded-md text-sm font-medium shadow-lg pointer-events-none">
+          {hoveredWord}
+        </div>
+      )}
+      
+      {/* Toolbar */}
+      <div className="absolute top-4 right-4 flex gap-2">
+        <button
+          onClick={handleExport}
+          className="flex items-center gap-2 bg-white dark:bg-slate-700 hover:bg-slate-50 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 px-3 py-2 rounded-lg shadow-sm transition-colors text-sm font-medium"
+          aria-label="Export word cloud"
         >
-          {hoveredWord.text} (weight: {hoveredWord.weight})
-        </div>
-      )}
-
-      {/* Loading indicator */}
-      {isRendering && (
-        <div className="absolute inset-0 flex items-center justify-center bg-white/50">
-          <div className="flex flex-col items-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
-            <span className="text-sm text-gray-600">Rendering word cloud...</span>
-          </div>
-        </div>
-      )}
+          <Download className="h-4 w-4" />
+          <span className="hidden sm:inline">Export</span>
+        </button>
+        
+        <button
+          onClick={handleShare}
+          className="flex items-center gap-2 bg-white dark:bg-slate-700 hover:bg-slate-50 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 px-3 py-2 rounded-lg shadow-sm transition-colors text-sm font-medium"
+          aria-label="Share word cloud"
+        >
+          <Share2 className="h-4 w-4" />
+          <span className="hidden sm:inline">Share</span>
+        </button>
+        
+        <button
+          onClick={() => {
+            // Reset word cloud
+            window.location.reload();
+          }}
+          className="flex items-center gap-2 bg-white dark:bg-slate-700 hover:bg-slate-50 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 px-3 py-2 rounded-lg shadow-sm transition-colors text-sm font-medium"
+          aria-label="Reset word cloud"
+        >
+          <RefreshCw className="h-4 w-4" />
+          <span className="hidden sm:inline">Reset</span>
+        </button>
+      </div>
     </div>
   );
+};
+
+export interface WordCloudProps {
+  words: Array<{ word: string; frequency: number }>;
+  width?: number;
+  height?: number;
+  onWordClick?: (word: string) => void;
+  onWordHover?: (word: string) => void;
+  onWordLeave?: () => void;
+  className?: string;
 }
+
+export default WordCloud;

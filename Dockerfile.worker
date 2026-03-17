@@ -1,0 +1,32 @@
+# =============================================================================
+# Word Cloud Analytics Platform - Background Worker Dockerfile
+# =============================================================================
+
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm ci --legacy-peer-deps
+
+COPY . .
+RUN npm run build:worker
+
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 worker
+
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+
+RUN chown -R worker:nodejs /app
+
+USER worker
+
+CMD ["node", "dist/worker/index.js"]
