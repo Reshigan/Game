@@ -1,0 +1,1 @@
+# src/contexts/AuthContext.tsx
